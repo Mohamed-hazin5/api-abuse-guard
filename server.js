@@ -15,10 +15,31 @@ app.use(async (req, res, next) => {
         const hits = await redis.incr(key);
 
         if (hits === 1) {
-            await redis.expire(key, 300); // 5 min window
+            await redis.expire(key, 300);
         }
 
+        const clientIp = req.headers["x-forwarded-for"] || req.ip;
+
+        console.log(
+            JSON.stringify({
+                time: new Date().toISOString(),
+                ip: clientIp,
+                fingerprint,
+                hits,
+                path: req.originalUrl,
+            })
+        );
+
         if (hits > 20) {
+            console.log(
+                JSON.stringify({
+                    ALERT: "BOT DETECTED",
+                    ip: clientIp,
+                    fingerprint,
+                    hits,
+                })
+            );
+
             return res.status(429).json({
                 message: "Too Many Requests — Bot behavior detected",
             });
@@ -30,6 +51,7 @@ app.use(async (req, res, next) => {
         next();
     }
 });
+
 
 app.get("/", (req, res) => {
     res.send("API Abuse Guard running 🚀");
