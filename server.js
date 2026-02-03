@@ -51,6 +51,24 @@ app.use(async (req, res, next) => {
         next();
     }
 });
+// Health check (for ops / monitoring)
+app.get("/health", async (req, res) => {
+    try {
+        await redis.ping();
+        res.json({ status: "ok", redis: "connected" });
+    } catch {
+        res.status(500).json({ status: "error", redis: "down" });
+    }
+});
+
+// Simple metrics (how many fingerprints active right now)
+app.get("/metrics", async (req, res) => {
+    const keys = await redis.keys("fp:*");
+    res.json({
+        activeFingerprints: keys.length,
+    });
+});
+
 
 
 app.get("/", (req, res) => {
