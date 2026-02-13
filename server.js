@@ -9,7 +9,7 @@ const {
 } = require("@aws-sdk/client-dynamodb");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.set("trust proxy", true);
 
@@ -17,17 +17,24 @@ const dynamo = new DynamoDBClient({
     region: "ap-south-1"
 });
 
-/* ===============================
-   MAIN INSPECTION MIDDLEWARE
-=================================*/
+/* ======================================================
+   MAIN INSPECTION + RISK ENGINE
+====================================================== */
 app.use(async (req, res, next) => {
     try {
-        const clientIp = req.headers["x-forwarded-for"] || req.ip;
+        // Extract real client IP
+        const clientIp =
+            (req.headers["x-forwarded-for"] || req.ip || "")
+                .split(",")[0]
+                .trim();
+
         const fingerprint = generateFingerprint(req);
         const redisKey = `fp:${fingerprint}`;
         const banKey = `ban:${clientIp}`;
 
-        // 🔴 Check if IP is banned
+        /* -------------------------
+           1️⃣ CHECK BAN LIST
+        -------------------------- */
         const isBanned = await redis.get(banKey);
         if (isBanned) {
             return res.status(403).json({
@@ -35,44 +42,52 @@ app.use(async (req, res, next) => {
             });
         }
 
-        // 🔵 Increment fingerprint hits
+        /* -------------------------
+           2️⃣ TRACK FINGERPRINT
+        -------------------------- */
         const hits = await redis.incr(redisKey);
         if (hits === 1) {
-            await redis.expire(redisKey, 300); // 5 min window
+            await redis.expire(redisKey, 300); // 5-minute window
         }
 
-        /* ===============================
-           RISK SCORING SYSTEM
-        =================================*/
+        /* -------------------------
+           3️⃣ RISK SCORING ENGINE
+        -------------------------- */
         let riskScore = 0;
 
         if (hits > 10) riskScore += 30;
         if (hits > 20) riskScore += 40;
 
-        if (req.headers["user-agent"]?.toLowerCase().includes("curl"))
+        const userAgent = req.headers["user-agent"] || "";
+
+        if (userAgent.toLowerCase().includes("curl"))
             riskScore += 40;
 
         if (!req.headers["accept"])
             riskScore += 20;
 
-        if (req.originalUrl.includes("admin"))
+        if (req.originalUrl.toLowerCase().includes("admin"))
             riskScore += 30;
 
-        /* ===============================
-           SAVE TO DYNAMODB
-        =================================*/
-        await dynamo.send(new PutItemCommand({
-            TableName: "api-request-logs",
-            Item: {
-                ip: { S: clientIp },
-                fingerprint: { S: fingerprint },
-                timestamp: { S: new Date().toISOString() },
-                hits: { N: hits.toString() },
-                riskScore: { N: riskScore.toString() },
-                path: { S: req.originalUrl },
-                userAgent: { S: req.headers["user-agent"] || "unknown" }
-            }
-        }));
+        /* -------------------------
+           4️⃣ SAVE LOG TO DYNAMODB
+        -------------------------- */
+        try {
+            await dynamo.send(new PutItemCommand({
+                TableName: "api-request-logs",
+                Item: {
+                    ip: { S: clientIp },
+                    fingerprint: { S: fingerprint },
+                    timestamp: { S: new Date().toISOString() },
+                    hits: { N: hits.toString() },
+                    riskScore: { N: riskScore.toString() },
+                    path: { S: req.originalUrl },
+                    userAgent: { S: userAgent || "unknown" }
+                }
+            }));
+        } catch (dbErr) {
+            console.error("DynamoDB write failed:", dbErr.message);
+        }
 
         console.log(JSON.stringify({
             time: new Date().toISOString(),
@@ -83,12 +98,11 @@ app.use(async (req, res, next) => {
             path: req.originalUrl
         }));
 
-        /* ===============================
-           DECISION ENGINE
-        =================================*/
+        /* -------------------------
+           5️⃣ DECISION ENGINE
+        -------------------------- */
         if (riskScore >= 70) {
-            // Auto ban for 10 minutes
-            await redis.set(banKey, "1", { EX: 600 });
+            await redis.set(banKey, "1", "EX", 600); // 10 min ban
 
             console.log("🚨 AUTO BAN:", clientIp);
 
@@ -106,9 +120,9 @@ app.use(async (req, res, next) => {
     }
 });
 
-/* ===============================
+/* ======================================================
    HEALTH CHECK
-=================================*/
+====================================================== */
 app.get("/health", async (req, res) => {
     try {
         await redis.ping();
@@ -118,9 +132,9 @@ app.get("/health", async (req, res) => {
     }
 });
 
-/* ===============================
-   METRICS (Redis Active Fingerprints)
-=================================*/
+/* ======================================================
+   REDIS LIVE METRICS
+====================================================== */
 app.get("/metrics", async (req, res) => {
     const keys = await redis.keys("fp:*");
     res.json({
@@ -128,9 +142,9 @@ app.get("/metrics", async (req, res) => {
     });
 });
 
-/* ===============================
-   DASHBOARD API - OVERVIEW
-=================================*/
+/* ======================================================
+   DASHBOARD: OVERVIEW
+====================================================== */
 app.get("/api/dashboard/overview", async (req, res) => {
     try {
         const data = await dynamo.send(new ScanCommand({
@@ -141,13 +155,15 @@ app.get("/api/dashboard/overview", async (req, res) => {
 
         const totalRequests = items.length;
 
-        const highRisk = items.filter(
+        const highRiskRequests = items.filter(
             item => parseInt(item.riskScore.N) >= 70
         ).length;
 
-        const uniqueIPs = new Set(items.map(item => item.ip.S)).size;
+        const uniqueIPs = new Set(
+            items.map(item => item.ip.S)
+        ).size;
 
-        const recent = items
+        const recentActivity = items
             .sort((a, b) =>
                 new Date(b.timestamp.S) - new Date(a.timestamp.S)
             )
@@ -155,20 +171,20 @@ app.get("/api/dashboard/overview", async (req, res) => {
 
         res.json({
             totalRequests,
-            highRiskRequests: highRisk,
+            highRiskRequests,
             uniqueIPs,
-            recentActivity: recent
+            recentActivity
         });
 
     } catch (err) {
-        console.error("Dashboard error:", err);
+        console.error("Dashboard overview error:", err);
         res.status(500).json({ error: "Dashboard failed" });
     }
 });
 
-/* ===============================
-   TOP ATTACKERS API
-=================================*/
+/* ======================================================
+   DASHBOARD: TOP ATTACKERS
+====================================================== */
 app.get("/api/dashboard/top-ips", async (req, res) => {
     try {
         const data = await dynamo.send(new ScanCommand({
@@ -176,7 +192,6 @@ app.get("/api/dashboard/top-ips", async (req, res) => {
         }));
 
         const items = data.Items || [];
-
         const counter = {};
 
         items.forEach(item => {
@@ -196,16 +211,16 @@ app.get("/api/dashboard/top-ips", async (req, res) => {
     }
 });
 
-/* ===============================
+/* ======================================================
    ROOT
-=================================*/
+====================================================== */
 app.get("/", (req, res) => {
     res.send("API Abuse Guard running 🚀");
 });
 
-/* ===============================
+/* ======================================================
    START SERVER
-=================================*/
+====================================================== */
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });

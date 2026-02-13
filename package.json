@@ -10,7 +10,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.989.0",
     "express": "^5.2.1",
-    "ioredis": "^5.9.2"
+    "ioredis": "^5.9.2",
+    "redis": "^5.10.0"
   }
 }
