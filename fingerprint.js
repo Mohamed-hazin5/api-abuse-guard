@@ -12,7 +12,7 @@ function generateFingerprint(req) {
         req.headers["sec-fetch-dest"],
         req.ip,
     ]
-        .filter(Boolean)
+        .filter(Bo olean)
         .join("|");
 
     return crypto.createHash("sha256").update(raw).digest("hex");
