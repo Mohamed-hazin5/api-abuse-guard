@@ -2,6 +2,9 @@ const { ScanCommand } = require("@aws-sdk/client-dynamodb");
 const dynamo = require("../services/dynamoService");
 const redis = require("../redisClient");
 
+/* ===============================
+   OVERVIEW
+=================================*/
 exports.getOverview = async (req, res) => {
     try {
         const data = await dynamo.send(new ScanCommand({
@@ -11,24 +14,37 @@ exports.getOverview = async (req, res) => {
         const items = data.Items || [];
 
         const totalRequests = items.length;
-        const uniqueIPs = new Set(items.map(i => i.ip.S)).size;
+
+        const uniqueIPs = new Set(
+            items.map(i => i.ipAddress?.S)
+        ).size;
 
         const highRisk = items.filter(
-            i => parseInt(i.riskScore.N) >= 70
+            i => i.riskScore && parseInt(i.riskScore.N) >= 70
         ).length;
+
+        const recent = items
+            .sort((a, b) =>
+                new Date(b.timestamp.S) - new Date(a.timestamp.S)
+            )
+            .slice(0, 20);
 
         res.json({
             totalRequests,
             uniqueIPs,
-            highRisk
+            highRisk,
+            recent
         });
 
     } catch (err) {
-        console.error(err);
+        console.error("Overview error:", err);
         res.status(500).json({ error: "Overview failed" });
     }
 };
 
+/* ===============================
+   TOP IPs
+=================================*/
 exports.getTopIPs = async (req, res) => {
     try {
         const data = await dynamo.send(new ScanCommand({
@@ -40,7 +56,8 @@ exports.getTopIPs = async (req, res) => {
         const counter = {};
 
         items.forEach(item => {
-            const ip = item.ip.S;
+            const ip = item.ipAddress?.S;
+            if (!ip) return;
             counter[ip] = (counter[ip] || 0) + 1;
         });
 
@@ -51,10 +68,14 @@ exports.getTopIPs = async (req, res) => {
         res.json(sorted);
 
     } catch (err) {
+        console.error("Top IP error:", err);
         res.status(500).json({ error: "Top IP failed" });
     }
 };
 
+/* ===============================
+   BANNED IPs (Redis)
+=================================*/
 exports.getBannedIPs = async (req, res) => {
     try {
         const keys = await redis.keys("ban:*");
@@ -66,6 +87,7 @@ exports.getBannedIPs = async (req, res) => {
         });
 
     } catch (err) {
+        console.error("Ban list error:", err);
         res.status(500).json({ error: "Ban list failed" });
     }
 };
