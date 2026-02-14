@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require("cors");
 const redis = require("./redisClient");
 const generateFingerprint = require("./fingerprint");
 
@@ -11,6 +12,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.set("trust proxy", true);
+
+/* ======================================================
+   CORS CONFIGURATION (VERY IMPORTANT)
+====================================================== */
+app.use(cors({
+    origin: "*", // You can restrict later if needed
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.use(express.json());
 
 /* ======================================================
    MAIN INSPECTION + RISK ENGINE
@@ -81,14 +93,14 @@ app.use(async (req, res, next) => {
             riskScore += 30;
 
         /* ------------------------------------------------
-           4️⃣ Save to DynamoDB (Correct Key Structure)
+           4️⃣ Save to DynamoDB
         ------------------------------------------------ */
         try {
             await dynamo.send(new PutItemCommand({
                 TableName: "api-request-logs",
                 Item: {
-                    ipAddress: { S: clientIp },   // ✅ matches partition key
-                    timestamp: { S: new Date().toISOString() }, // ✅ matches sort key
+                    ipAddress: { S: clientIp },
+                    timestamp: { S: new Date().toISOString() },
                     fingerprint: { S: fingerprint },
                     hits: { N: hits.toString() },
                     riskScore: { N: riskScore.toString() },
