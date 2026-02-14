@@ -2,9 +2,7 @@ const express = require("express");
 const redis = require("./redisClient");
 const generateFingerprint = require("./fingerprint");
 
-const {
-    PutItemCommand
-} = require("@aws-sdk/client-dynamodb");
+const { PutItemCommand } = require("@aws-sdk/client-dynamodb");
 
 const dynamo = require("./services/dynamoService");
 const dashboardRoutes = require("./routes/dashboardRoutes");
@@ -19,6 +17,22 @@ app.set("trust proxy", true);
 ====================================================== */
 app.use(async (req, res, next) => {
     try {
+
+        /* ------------------------------------------------
+           🚫 Skip inspection for system routes
+        ------------------------------------------------ */
+        const skipPaths = [
+            "/health",
+            "/api/dashboard"
+        ];
+
+        if (skipPaths.some(path => req.originalUrl.startsWith(path))) {
+            return next();
+        }
+
+        /* ------------------------------------------------
+           Extract real client IP
+        ------------------------------------------------ */
         const clientIp =
             (req.headers["x-forwarded-for"] || req.ip || "")
                 .split(",")[0]
@@ -28,7 +42,9 @@ app.use(async (req, res, next) => {
         const redisKey = `fp:${fingerprint}`;
         const banKey = `ban:${clientIp}`;
 
-        // 1️⃣ Check Ban
+        /* ------------------------------------------------
+           1️⃣ Check Ban List
+        ------------------------------------------------ */
         const isBanned = await redis.get(banKey);
         if (isBanned) {
             return res.status(403).json({
@@ -36,13 +52,18 @@ app.use(async (req, res, next) => {
             });
         }
 
-        // 2️⃣ Track fingerprint
+        /* ------------------------------------------------
+           2️⃣ Track Fingerprint Activity
+        ------------------------------------------------ */
         const hits = await redis.incr(redisKey);
+
         if (hits === 1) {
-            await redis.expire(redisKey, 300);
+            await redis.expire(redisKey, 300); // 5-minute window
         }
 
-        // 3️⃣ Risk Engine
+        /* ------------------------------------------------
+           3️⃣ Risk Scoring Engine
+        ------------------------------------------------ */
         let riskScore = 0;
 
         if (hits > 10) riskScore += 30;
@@ -59,13 +80,15 @@ app.use(async (req, res, next) => {
         if (req.originalUrl.toLowerCase().includes("admin"))
             riskScore += 30;
 
-        // 4️⃣ Save to DynamoDB (FIXED key name)
+        /* ------------------------------------------------
+           4️⃣ Save to DynamoDB (Correct Key Structure)
+        ------------------------------------------------ */
         try {
             await dynamo.send(new PutItemCommand({
                 TableName: "api-request-logs",
                 Item: {
-                    ipAddress: { S: clientIp },  // ✅ FIXED
-                    timestamp: { S: new Date().toISOString() },
+                    ipAddress: { S: clientIp },   // ✅ matches partition key
+                    timestamp: { S: new Date().toISOString() }, // ✅ matches sort key
                     fingerprint: { S: fingerprint },
                     hits: { N: hits.toString() },
                     riskScore: { N: riskScore.toString() },
@@ -77,9 +100,11 @@ app.use(async (req, res, next) => {
             console.error("DynamoDB write failed:", err.message);
         }
 
-        // 5️⃣ Decision
+        /* ------------------------------------------------
+           5️⃣ Decision Engine
+        ------------------------------------------------ */
         if (riskScore >= 70) {
-            await redis.set(banKey, "1", "EX", 600);
+            await redis.set(banKey, "1", "EX", 600); // 10 min ban
 
             return res.status(429).json({
                 message: "Blocked — High risk behavior",
@@ -96,7 +121,7 @@ app.use(async (req, res, next) => {
 });
 
 /* ======================================================
-   HEALTH
+   HEALTH ROUTE
 ====================================================== */
 app.get("/health", async (req, res) => {
     try {
@@ -113,14 +138,14 @@ app.get("/health", async (req, res) => {
 app.use("/api/dashboard", dashboardRoutes);
 
 /* ======================================================
-   ROOT
+   ROOT ROUTE
 ====================================================== */
 app.get("/", (req, res) => {
     res.send("API Abuse Guard running 🚀");
 });
 
 /* ======================================================
-   START
+   START SERVER
 ====================================================== */
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
