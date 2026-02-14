@@ -4,7 +4,6 @@ const redis = require("./redisClient");
 const generateFingerprint = require("./fingerprint");
 
 const { PutItemCommand } = require("@aws-sdk/client-dynamodb");
-
 const dynamo = require("./services/dynamoService");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 
@@ -14,10 +13,10 @@ const PORT = process.env.PORT || 3000;
 app.set("trust proxy", true);
 
 /* ======================================================
-   CORS CONFIGURATION (VERY IMPORTANT)
+   CORS CONFIG
 ====================================================== */
 app.use(cors({
-    origin: "*", // You can restrict later if needed
+    origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -25,18 +24,15 @@ app.use(cors({
 app.use(express.json());
 
 /* ======================================================
-   MAIN INSPECTION + RISK ENGINE
+   MAIN INSPECTION + ADVANCED RISK ENGINE
 ====================================================== */
 app.use(async (req, res, next) => {
     try {
 
         /* ------------------------------------------------
-           🚫 Skip inspection for system routes
+           🚫 Skip system routes (dashboard + health)
         ------------------------------------------------ */
-        const skipPaths = [
-            "/health",
-            "/api/dashboard"
-        ];
+        const skipPaths = ["/health", "/api/dashboard"];
 
         if (skipPaths.some(path => req.originalUrl.startsWith(path))) {
             return next();
@@ -51,30 +47,43 @@ app.use(async (req, res, next) => {
                 .trim();
 
         const fingerprint = generateFingerprint(req);
-        const redisKey = `fp:${fingerprint}`;
-        const banKey = `ban:${clientIp}`;
+
+        const fpKey = `fp:${fingerprint}`;
+        const fpBanKey = `ban:fp:${fingerprint}`;
+        const ipBanKey = `ban:ip:${clientIp}`;
+        const ipRiskKey = `ip:risk:${clientIp}`;
 
         /* ------------------------------------------------
-           1️⃣ Check Ban List
+           1️⃣ Check Full IP Ban
         ------------------------------------------------ */
-        const isBanned = await redis.get(banKey);
-        if (isBanned) {
+        const ipBanned = await redis.get(ipBanKey);
+        if (ipBanned) {
             return res.status(403).json({
-                message: "IP banned due to suspicious activity"
+                message: "Network temporarily blocked due to repeated abuse"
             });
         }
 
         /* ------------------------------------------------
-           2️⃣ Track Fingerprint Activity
+           2️⃣ Check Fingerprint Ban
         ------------------------------------------------ */
-        const hits = await redis.incr(redisKey);
-
-        if (hits === 1) {
-            await redis.expire(redisKey, 300); // 5-minute window
+        const fpBanned = await redis.get(fpBanKey);
+        if (fpBanned) {
+            return res.status(403).json({
+                message: "Device temporarily blocked"
+            });
         }
 
         /* ------------------------------------------------
-           3️⃣ Risk Scoring Engine
+           3️⃣ Track Fingerprint Activity
+        ------------------------------------------------ */
+        const hits = await redis.incr(fpKey);
+
+        if (hits === 1) {
+            await redis.expire(fpKey, 300); // 5-minute window
+        }
+
+        /* ------------------------------------------------
+           4️⃣ Risk Scoring Engine
         ------------------------------------------------ */
         let riskScore = 0;
 
@@ -93,7 +102,7 @@ app.use(async (req, res, next) => {
             riskScore += 30;
 
         /* ------------------------------------------------
-           4️⃣ Save to DynamoDB
+           5️⃣ Save Log to DynamoDB
         ------------------------------------------------ */
         try {
             await dynamo.send(new PutItemCommand({
@@ -113,13 +122,25 @@ app.use(async (req, res, next) => {
         }
 
         /* ------------------------------------------------
-           5️⃣ Decision Engine
+           6️⃣ Advanced Decision Engine
         ------------------------------------------------ */
         if (riskScore >= 70) {
-            await redis.set(banKey, "1", "EX", 600); // 10 min ban
+
+            // 🔴 Ban fingerprint first
+            await redis.set(fpBanKey, "1", "EX", 600); // 10 min
+
+            // 🔴 Increase IP abuse counter
+            const ipRiskCount = await redis.incr(ipRiskKey);
+            await redis.expire(ipRiskKey, 900); // 15 min tracking window
+
+            // 🚨 Escalation: multiple devices attacking from same IP
+            if (ipRiskCount >= 3) {
+                await redis.set(ipBanKey, "1", "EX", 1800); // 30 min full IP ban
+                console.log("🚨 NETWORK ESCALATION BAN:", clientIp);
+            }
 
             return res.status(429).json({
-                message: "Blocked — High risk behavior",
+                message: "Device blocked due to suspicious activity",
                 riskScore
             });
         }
