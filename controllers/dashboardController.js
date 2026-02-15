@@ -16,7 +16,7 @@ exports.getOverview = async (req, res) => {
         const totalRequests = items.length;
 
         const uniqueIPs = new Set(
-            items.map(i => i.ipAddress?.S)
+            items.map(i => i.ipAddress?.S).filter(Boolean)
         ).size;
 
         const highRisk = items.filter(
@@ -25,7 +25,8 @@ exports.getOverview = async (req, res) => {
 
         const recent = items
             .sort((a, b) =>
-                new Date(b.timestamp?.S) - new Date(a.timestamp?.S)
+                new Date(b.timestamp?.S || 0) -
+                new Date(a.timestamp?.S || 0)
             )
             .slice(0, 20);
 
@@ -73,16 +74,22 @@ exports.getTopIPs = async (req, res) => {
 };
 
 /* ==============================
-   BANNED IPS
+   BANNED ENTITIES (IP + FP)
 ============================== */
 exports.getBannedIPs = async (req, res) => {
     try {
-        const keys = await redis.keys("ban:*");
-        const banned = keys.map(k => k.replace("ban:", ""));
+        // Fetch both IP bans and fingerprint bans
+        const ipKeys = await redis.keys("ban:*");
+        const fpKeys = await redis.keys("fpban:*");
+
+        const ipBans = ipKeys.map(k => k.replace("ban:", ""));
+        const fingerprintBans = fpKeys.map(k => k.replace("fpban:", ""));
 
         res.json({
-            bannedCount: banned.length,
-            banned
+            ipBanCount: ipBans.length,
+            fingerprintBanCount: fingerprintBans.length,
+            ipBans,
+            fingerprintBans
         });
 
     } catch (err) {
